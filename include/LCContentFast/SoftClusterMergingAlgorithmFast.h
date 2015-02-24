@@ -47,11 +47,11 @@ public:
     ~SoftClusterMergingAlgorithm();
 
 private:
-    typedef KDTreeLinkerAlgo<const pandora::CaloHit*, 3> HitKDTree3D;
-    typedef KDTreeNodeInfoT<const pandora::CaloHit*, 3> HitKDNode3D;
+    typedef KDTreeLinkerAlgo<const pandora::CaloHit*, 3> HitKDTree;
+    typedef KDTreeNodeInfoT<const pandora::CaloHit*, 3> HitKDNode;
+	typedef KDTreeLinkerAlgo<unsigned,3> HitKDTreeByIndex;
+    typedef KDTreeNodeInfoT<unsigned,3> HitKDNodeByIndex;
     typedef std::unordered_map<const pandora::ClusterList *, std::string> ClusterListToNameMap;
-    typedef std::unordered_map<const pandora::CaloHit*, int> HitToClusterMap;
-    typedef std::unordered_multimap<const pandora::CaloHit*, const pandora::CaloHit*> HitsToHitsCacheMap;
 
     pandora::StatusCode Run();
 
@@ -64,23 +64,6 @@ private:
     void GetInputClusters(pandora::ClusterList &clusterList, ClusterListToNameMap &clusterListToNameMap) const;
 
     /**
-     *  @brief  Get the input calo hits (constituents of the input clusters)
-     * 
-     *  @param  clusterVector the vector of input clusters
-     *  @param  fullCaloHitList to receive the populated calo hit list
-     *  @param  hitToClusterMap to receive the populated calo hit to cluster map
-     */
-    void GetInputCaloHits(const pandora::ClusterVector &clusterVector, pandora::CaloHitList &fullCaloHitList,
-        HitToClusterMap &hitToClusterMap) const;
-
-    /**
-     *  @brief  Initialize a kd-tree of the input hits to the preparation alg.
-     * 
-     *  @param  pCaloHitList -- the calorimeter hit list
-     */
-    void InitializeKDTree(const pandora::CaloHitList *const pCaloHitList);
-
-    /**
      *  @brief  Whether a daughter candidate cluster is a "soft" cluster
      * 
      *  @param  pDaughterCluster address of the daughter candidate cluster
@@ -88,21 +71,6 @@ private:
      *  @return boolean
      */
     bool IsSoftCluster(const pandora::Cluster *const pDaughterCluster) const;
-
-    /**
-     *  @brief  Find the best parent cluster for a provided list of daughter calo hits
-     * 
-     *  @param  clusterVector the cluster vector
-     *  @param  hitToClusterMap the hit to cluster map
-     *  @param  quickUnion to handle updating cluster indices
-     *  @param  pDaughterCluster the address of the daughter cluster
-     *  @param  daughterHits the provided list of daughter calo hits
-     *  @param  closestDistance to receive the closest hit separation
-     * 
-     *  @return the index of the best parent cluster
-     */
-    int FindBestParentCluster(const pandora::ClusterVector &clusterVector, const HitToClusterMap &hitToClusterMap, QuickUnion &quickUnion,
-        const pandora::Cluster *const pDaughterCluster, const pandora::CaloHitList &daughterHits, float &closestDistance) const;
 
     /**
      *  @brief  Whether a soft daughter candidate cluster can be merged with a parent a specified distance away
@@ -161,10 +129,6 @@ private:
         
     float                   m_maxClusterDistanceFine;               ///< Fine granularity max distance between parent and daughter clusters
     float                   m_maxClusterDistanceCoarse;             ///< Coarse granularity max distance between parent and daughter clusters
-
-    HitsToHitsCacheMap         *m_hitsToHitsCacheMap;               ///< To cache nearby hits retrieved from kd-tree
-    std::vector<HitKDNode3D>   *m_hitNodes3D;                       ///< nodes for the KD tree (used for filling)
-    HitKDTree3D                *m_hitsKdTree3D;                     ///< the kd-tree itself, 3D in x,y,z
 };
 
 //------------------------------------------------------------------------------------------------------------------------------------------

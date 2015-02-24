@@ -15,6 +15,8 @@
 #include "LCContentFast/SoftClusterMergingAlgorithmFast.h"
 #include "LCContentFast/QuickUnion.h"
 
+#include <memory>
+
 using namespace pandora;
 
 namespace lc_content_fast
@@ -36,10 +38,7 @@ SoftClusterMergingAlgorithm::SoftClusterMergingAlgorithm() :
     m_closestDistanceCut2(250.f),
     m_innerLayerCut2(40),
     m_maxClusterDistanceFine(100.f),
-    m_maxClusterDistanceCoarse(250.f),
-    m_hitsToHitsCacheMap(new HitsToHitsCacheMap),
-    m_hitNodes3D(new std::vector<HitKDNode3D>),
-    m_hitsKdTree3D(new HitKDTree3D)
+    m_maxClusterDistanceCoarse(250.f)
 {
 }
 
@@ -47,30 +46,104 @@ SoftClusterMergingAlgorithm::SoftClusterMergingAlgorithm() :
 
 SoftClusterMergingAlgorithm::~SoftClusterMergingAlgorithm()
 {
-    delete m_hitsToHitsCacheMap;
-    delete m_hitNodes3D;
-    delete m_hitsKdTree3D;
+
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 StatusCode SoftClusterMergingAlgorithm::Run()
 {
+    // need to do some of the searching with vectors (hash table too slow)
+    HitKDTreeByIndex hits_kdtree_byindex;
+    std::vector<HitKDNodeByIndex> hit_nodes_by_index;
+    std::vector<const CaloHit*> hits_by_index;
+    //std::vector<const Cluster*> hits_to_clusters_by_hit_index;
+    std::vector<unsigned int> hit_index_to_cluster_index;
+
+    // save local kd-trees of each cluster that we will update over time
+    // this will hopefully speed up cluster distance calculations
+	std::vector<std::unique_ptr<HitKDTree> > trees_by_cluster_index;
+    std::vector<std::vector<unsigned int> > cluster_index_to_neighbours_indices;
+    //ClusterToKDTreeMap clusters_to_hit_tree;    
+
+    // get the *starting* cluster list
     ClusterList clusterList;
     ClusterListToNameMap clusterListToNameMap;
-    this->GetInputClusters(clusterList, clusterListToNameMap);
+    this->GetInputClusters(clusterList, clusterListToNameMap);	
 
     ClusterVector clusterVector(clusterList.begin(), clusterList.end());
     std::sort(clusterVector.begin(), clusterVector.end(), lc_content::SortingHelper::SortClustersByInnerLayer);
     QuickUnion quickUnion(clusterVector.size());
+    trees_by_cluster_index.reserve(clusterVector.size());
+	cluster_index_to_neighbours_indices.reserve(clusterVector.size());
 
-    CaloHitList fullCaloHitList;
-    HitToClusterMap hitToClusterMap;
-    this->GetInputCaloHits(clusterVector, fullCaloHitList, hitToClusterMap);
-    this->InitializeKDTree(&fullCaloHitList);
-
-    int index(-1);
-
+	int index(-1);
+    for(const Cluster *const pCluster : clusterVector) {
+        ++index;
+	    trees_by_cluster_index.push_back(std::unique_ptr<HitKDTree>(new HitKDTree()));
+	    const auto& tree = trees_by_cluster_index.back();
+        std::array<float,3> minpos{ {0.0f,0.0f,0.0f} }, maxpos{ {0.0f,0.0f,0.0f} };
+        std::vector<HitKDNode> nodes_for_local_tree;
+        CaloHitList temp;      
+        pCluster->GetOrderedCaloHitList().GetCaloHitList(temp);
+        unsigned nhits = 0;
+        for( auto* hit : temp ) {
+            const CartesianVector& pos = hit->GetPositionVector();
+            nodes_for_local_tree.emplace_back(hit,pos.GetX(),pos.GetY(),pos.GetZ());
+            if( nhits == 0 ) {
+                minpos[0] = pos.GetX(); minpos[1] = pos.GetY(); minpos[2] = pos.GetZ();
+                maxpos[0] = pos.GetX(); maxpos[1] = pos.GetY(); maxpos[2] = pos.GetZ();
+            } else {
+                minpos[0] = std::min((float)pos.GetX(),minpos[0]);
+                minpos[1] = std::min((float)pos.GetY(),minpos[1]);
+                minpos[2] = std::min((float)pos.GetZ(),minpos[2]);
+                maxpos[0] = std::max((float)pos.GetX(),maxpos[0]);
+                maxpos[1] = std::max((float)pos.GetY(),maxpos[1]);
+                maxpos[2] = std::max((float)pos.GetZ(),maxpos[2]);
+            }
+            hits_by_index.emplace_back(hit);
+            hit_index_to_cluster_index.emplace_back(index);	
+            ++nhits;
+        }
+        KDTreeCube clusterBoundingBox(minpos[0],maxpos[0],
+                                      minpos[1],maxpos[1],
+                                      minpos[2],maxpos[2]);
+        tree->build(nodes_for_local_tree,clusterBoundingBox);
+    }
+    KDTreeCube hitsByIndexBoundingRegion =
+      fill_and_bound_3d_kd_tree_by_index(hits_by_index,hit_nodes_by_index);
+    hits_kdtree_byindex.build(hit_nodes_by_index,hitsByIndexBoundingRegion);
+    hit_nodes_by_index.clear();    
+    
+    // now we build the neighbours cache so that we can efficiently search in the inner loop
+	index = -1;
+    for(const Cluster *const pCluster : clusterVector) {
+        ++index;
+        const float searchDistance((PandoraContentApi::GetGeometry(*this)->GetHitTypeGranularity(pCluster->GetOuterLayerHitType()) <= FINE) ?
+          m_maxClusterDistanceFine : m_maxClusterDistanceCoarse);
+        CaloHitList hits;
+        pCluster->GetOrderedCaloHitList().GetCaloHitList(hits);
+        std::vector<unsigned int> neighbours;
+        for( auto* hit : hits ) {
+            KDTreeCube hitSearchRegion = build_3d_kd_search_region(hit,
+                                                                   searchDistance,
+                                                                   searchDistance,
+                                                                   searchDistance );
+	        std::vector<HitKDNodeByIndex> found_hits;
+	        hits_kdtree_byindex.search(hitSearchRegion,found_hits);
+		    //should there be a reserve here?
+			neighbours.reserve(neighbours.size()+found_hits.size());
+	        for( auto& found_hit : found_hits ) {	  	  
+	            unsigned int pNeighbour = hit_index_to_cluster_index[found_hit.data];
+	            if( index != static_cast<int>(pNeighbour) ) { // make sure this is a neighbour
+	                neighbours.push_back(pNeighbour);
+	            }
+	        }
+        }
+	    cluster_index_to_neighbours_indices.push_back(std::move(neighbours));
+    }
+	
+    index = -1;
     for (const Cluster *const pDaughterCluster : clusterVector)
     {
         ++index;
@@ -78,16 +151,65 @@ StatusCode SoftClusterMergingAlgorithm::Run()
         if (!this->IsSoftCluster(pDaughterCluster))
             continue;
 
+        int bestParentIndex(-1);
+        float bestParentClusterEnergy(0.);
+        float minDistanceSquared(std::numeric_limits<float>::max());
+		
         CaloHitList theseHits;
         pDaughterCluster->GetOrderedCaloHitList().GetCaloHitList(theseHits);
 
-        float closestDistance(std::numeric_limits<float>::max());
-        const int parentIndex(this->FindBestParentCluster(clusterVector, hitToClusterMap, quickUnion, pDaughterCluster, theseHits, closestDistance));
-
-        if ((parentIndex >= 0) && this->CanMergeSoftCluster(pDaughterCluster, closestDistance))
+	    for (const CaloHit *const pCaloHitI : theseHits)
         {
-            this->MergeClusters(clusterVector.at(parentIndex), pDaughterCluster, clusterListToNameMap);
-            quickUnion.Unite(index, parentIndex);
+			const CartesianVector &positionVectorI(pCaloHitI->GetPositionVector());
+			
+	        // find our nearby clusters in the neighbours cache	
+	        ClusterList nearby_clusters;
+	        const auto& original_neighbours = cluster_index_to_neighbours_indices[index];
+			
+	        for( auto neighbour : original_neighbours ) {
+				//in this loop, run all neighbour indices through quickUnion to keep track of merged clusters
+				unsigned int parentIndex = quickUnion.Find(neighbour);
+				const Cluster *const pParentCluster = clusterVector.at(parentIndex);
+                const float clusterEnergy(pParentCluster->GetHadronicEnergy());
+                
+                if (clusterEnergy < m_minClusterHadEnergy)
+                    continue;
+                
+                if (pParentCluster->GetNCaloHits() <= m_maxHitsInSoftCluster)
+                    continue;
+                
+				// find the NN in the parent cluster and test
+				const auto& hit_tree = trees_by_cluster_index.at(parentIndex);
+	            float parent_distance = std::numeric_limits<float>::max();
+	            HitKDNode daughter_point(pCaloHitI,positionVectorI.GetX(),positionVectorI.GetY(),positionVectorI.GetZ());
+	            HitKDNode* theresult = nullptr;
+	            hit_tree->findNearestNeighbour(daughter_point,theresult,parent_distance);	    
+	            if( nullptr != theresult && parent_distance != std::numeric_limits<float>::max() ){
+					const float distanceSquared(parent_distance*parent_distance);
+                    if ((distanceSquared < minDistanceSquared) || ((distanceSquared == minDistanceSquared) && (clusterEnergy > bestParentClusterEnergy)))
+                    {
+                        minDistanceSquared = distanceSquared;
+                        bestParentClusterEnergy = clusterEnergy;
+                        bestParentIndex = parentIndex;
+                    }
+				}
+	        }
+		}
+
+        if ((bestParentIndex >= 0) && this->CanMergeSoftCluster(pDaughterCluster, sqrt(minDistanceSquared)))
+        {
+            const Cluster *const pBestParentCluster = clusterVector.at(bestParentIndex);
+			this->MergeClusters(pBestParentCluster, pDaughterCluster, clusterListToNameMap);
+            quickUnion.Unite(index, bestParentIndex);
+			// update the parent cluster kd tree
+	        auto& tree = trees_by_cluster_index.at(bestParentIndex);
+	        tree.reset(new HitKDTree());
+	        CaloHitList temp;
+	        std::vector<HitKDNode> hit_nodes;
+	        pBestParentCluster->GetOrderedCaloHitList().GetCaloHitList(temp);
+	        KDTreeCube clusterBoundingBox =
+	          fill_and_bound_3d_kd_tree(temp,hit_nodes);
+	        tree->build(hit_nodes,clusterBoundingBox);
         }
     }
 
@@ -131,37 +253,6 @@ void SoftClusterMergingAlgorithm::GetInputClusters(ClusterList &clusterList, Clu
 
 //------------------------------------------------------------------------------------------------------------------------------------------
 
-void SoftClusterMergingAlgorithm::GetInputCaloHits(const ClusterVector &clusterVector, CaloHitList &fullCaloHitList, HitToClusterMap &hitToClusterMap) const
-{
-    int index(-1);
-
-    for (const Cluster *const pCluster : clusterVector)
-    {
-        ++index;
-
-        CaloHitList caloHitList;
-        pCluster->GetOrderedCaloHitList().GetCaloHitList(caloHitList);
-        fullCaloHitList.insert(caloHitList.begin(), caloHitList.end());
-
-        for (const CaloHit *const pCaloHit : caloHitList)
-            (void) hitToClusterMap.insert(HitToClusterMap::value_type(pCaloHit, index));
-    }
-}
-
-//------------------------------------------------------------------------------------------------------------------------------------------
-
-void SoftClusterMergingAlgorithm::InitializeKDTree(const CaloHitList *const pCaloHitList) 
-{
-    m_hitsToHitsCacheMap->clear();
-    m_hitsKdTree3D->clear();
-    m_hitNodes3D->clear();
-    KDTreeCube hitsBoundingRegion3D = fill_and_bound_3d_kd_tree(this, *pCaloHitList, *m_hitNodes3D, true);
-    m_hitsKdTree3D->build(*m_hitNodes3D, hitsBoundingRegion3D);
-    m_hitNodes3D->clear();
-}
-
-//------------------------------------------------------------------------------------------------------------------------------------------
-
 bool SoftClusterMergingAlgorithm::IsSoftCluster(const Cluster *const pDaughterCluster) const
 {
     // Note the cuts applied here are order-dependent - use the order defined in original version of pandora
@@ -196,77 +287,6 @@ bool SoftClusterMergingAlgorithm::IsSoftCluster(const Cluster *const pDaughterCl
         isSoftCluster = false;
 
     return isSoftCluster;
-}
-
-//------------------------------------------------------------------------------------------------------------------------------------------
-
-int SoftClusterMergingAlgorithm::FindBestParentCluster(const ClusterVector &clusterVector, const HitToClusterMap &hitToClusterMap,
-    QuickUnion &quickUnion, const Cluster *const pDaughterCluster, const CaloHitList &daughterHits, float &closestDistance) const
-{
-    int bestParentIndex(-1);
-    closestDistance = std::numeric_limits<float>::max();
-
-    const float searchDistance((PandoraContentApi::GetGeometry(*this)->GetHitTypeGranularity(pDaughterCluster->GetOuterLayerHitType()) <= FINE) ?
-        m_maxClusterDistanceFine : m_maxClusterDistanceCoarse);
-
-    float bestParentClusterEnergy(0.);
-    float minDistanceSquared(std::numeric_limits<float>::max());
-
-    for (const CaloHit *const pCaloHitI : daughterHits)
-    {
-        const CartesianVector &positionVectorI(pCaloHitI->GetPositionVector());
-        CaloHitList nearby_hits;
-
-        if (m_hitsToHitsCacheMap->count(pCaloHitI))
-        {
-            const auto range = m_hitsToHitsCacheMap->equal_range(pCaloHitI);
-
-            for (auto rangeIter = range.first; rangeIter != range.second; ++rangeIter)
-                nearby_hits.insert(rangeIter->second);
-        }
-        else
-        {
-            KDTreeCube searchRegionHits = build_3d_kd_search_region(pCaloHitI, searchDistance, searchDistance, searchDistance);
-            std::vector<HitKDNode3D> found;
-            m_hitsKdTree3D->search(searchRegionHits, found);
-
-            for (const auto &hit : found)
-            {
-                m_hitsToHitsCacheMap->emplace(pCaloHitI, hit.data);
-                nearby_hits.insert(hit.data);
-            }
-        }
-
-        for (const CaloHit *const pCaloHitJ : nearby_hits)
-        {
-            if (daughterHits.count(pCaloHitJ))
-                continue;
-
-            const int parentIndex(static_cast<int>(quickUnion.Find(hitToClusterMap.at(pCaloHitJ))));
-            const Cluster *const pClusterJ = clusterVector.at(parentIndex);
-            const float clusterEnergyJ(pClusterJ->GetHadronicEnergy());
-
-            if (clusterEnergyJ < m_minClusterHadEnergy)
-                continue;
-
-            if (pClusterJ->GetNCaloHits() <= m_maxHitsInSoftCluster)
-                continue;
-
-            const float distanceSquared((positionVectorI - pCaloHitJ->GetPositionVector()).GetMagnitudeSquared());
-
-            if ((distanceSquared < minDistanceSquared) || ((distanceSquared == minDistanceSquared) && (clusterEnergyJ > bestParentClusterEnergy)))
-            {
-                minDistanceSquared = distanceSquared;
-                bestParentClusterEnergy = clusterEnergyJ;
-                bestParentIndex = parentIndex;
-            }
-        }
-    }
-
-    if (bestParentIndex >= 0)
-        closestDistance = std::sqrt(minDistanceSquared);
-
-    return bestParentIndex;
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
