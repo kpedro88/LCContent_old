@@ -57,14 +57,11 @@ StatusCode SoftClusterMergingAlgorithm::Run()
     HitKDTreeByIndex hits_kdtree_byindex;
     std::vector<HitKDNodeByIndex> hit_nodes_by_index;
     std::vector<const CaloHit*> hits_by_index;
-    //std::vector<const Cluster*> hits_to_clusters_by_hit_index;
     std::vector<unsigned int> hit_index_to_cluster_index;
 
     // save local kd-trees of each cluster that we will update over time
     // this will hopefully speed up cluster distance calculations
 	std::vector<std::unique_ptr<HitKDTree> > trees_by_cluster_index;
-    std::vector<std::vector<unsigned int> > cluster_index_to_neighbours_indices;
-    //ClusterToKDTreeMap clusters_to_hit_tree;    
 
     // get the *starting* cluster list
     ClusterList clusterList;
@@ -75,7 +72,6 @@ StatusCode SoftClusterMergingAlgorithm::Run()
     std::sort(clusterVector.begin(), clusterVector.end(), lc_content::SortingHelper::SortClustersByInnerLayer);
     QuickUnion quickUnion(clusterVector.size());
     trees_by_cluster_index.reserve(clusterVector.size());
-	cluster_index_to_neighbours_indices.reserve(clusterVector.size());
 
 	int index(-1);
     for(const Cluster *const pCluster : clusterVector) {
@@ -113,35 +109,7 @@ StatusCode SoftClusterMergingAlgorithm::Run()
     KDTreeCube hitsByIndexBoundingRegion =
       fill_and_bound_3d_kd_tree_by_index(hits_by_index,hit_nodes_by_index);
     hits_kdtree_byindex.build(hit_nodes_by_index,hitsByIndexBoundingRegion);
-    hit_nodes_by_index.clear();    
-    
-    // now we build the neighbours cache so that we can efficiently search in the inner loop
-	index = -1;
-    for(const Cluster *const pCluster : clusterVector) {
-        ++index;
-        const float searchDistance((PandoraContentApi::GetGeometry(*this)->GetHitTypeGranularity(pCluster->GetOuterLayerHitType()) <= FINE) ?
-          m_maxClusterDistanceFine : m_maxClusterDistanceCoarse);
-        CaloHitList hits;
-        pCluster->GetOrderedCaloHitList().GetCaloHitList(hits);
-        std::vector<unsigned int> neighbours;
-        for( auto* hit : hits ) {
-            KDTreeCube hitSearchRegion = build_3d_kd_search_region(hit,
-                                                                   searchDistance,
-                                                                   searchDistance,
-                                                                   searchDistance );
-	        std::vector<HitKDNodeByIndex> found_hits;
-	        hits_kdtree_byindex.search(hitSearchRegion,found_hits);
-		    //should there be a reserve here?
-			neighbours.reserve(neighbours.size()+found_hits.size());
-	        for( auto& found_hit : found_hits ) {	  	  
-	            unsigned int pNeighbour = hit_index_to_cluster_index[found_hit.data];
-	            if( index != static_cast<int>(pNeighbour) ) { // make sure this is a neighbour
-	                neighbours.push_back(pNeighbour);
-	            }
-	        }
-        }
-	    cluster_index_to_neighbours_indices.push_back(std::move(neighbours));
-    }
+    hit_nodes_by_index.clear();
 	
     index = -1;
     for (const Cluster *const pDaughterCluster : clusterVector)
@@ -154,7 +122,9 @@ StatusCode SoftClusterMergingAlgorithm::Run()
         int bestParentIndex(-1);
         float bestParentClusterEnergy(0.);
         float minDistanceSquared(std::numeric_limits<float>::max());
-		
+		const float searchDistance((PandoraContentApi::GetGeometry(*this)->GetHitTypeGranularity(pDaughterCluster->GetOuterLayerHitType()) <= FINE) ?
+          m_maxClusterDistanceFine : m_maxClusterDistanceCoarse);
+
         CaloHitList theseHits;
         pDaughterCluster->GetOrderedCaloHitList().GetCaloHitList(theseHits);
 
@@ -162,13 +132,21 @@ StatusCode SoftClusterMergingAlgorithm::Run()
         {
 			const CartesianVector &positionVectorI(pCaloHitI->GetPositionVector());
 			
-	        // find our nearby clusters in the neighbours cache	
-	        ClusterList nearby_clusters;
-	        const auto& original_neighbours = cluster_index_to_neighbours_indices[index];
-			
-	        for( auto neighbour : original_neighbours ) {
+	        // find our nearby clusters
+			KDTreeCube hitSearchRegion = build_3d_kd_search_region(pCaloHitI,
+                                                                   searchDistance,
+                                                                   searchDistance,
+                                                                   searchDistance );
+	        std::vector<HitKDNodeByIndex> found_hits;
+	        hits_kdtree_byindex.search(hitSearchRegion,found_hits);
+
+	        for( auto& found_hit : found_hits ) {
 				//in this loop, run all neighbour indices through quickUnion to keep track of merged clusters
-				unsigned int parentIndex = quickUnion.Find(neighbour);
+	            unsigned int parentIndex = quickUnion.Find(hit_index_to_cluster_index.at(found_hit.data));
+				// make sure this is a neighbour
+	            if( index == static_cast<int>(parentIndex) )  
+	                continue;
+	            
 				const Cluster *const pParentCluster = clusterVector.at(parentIndex);
                 const float clusterEnergy(pParentCluster->GetHadronicEnergy());
                 
