@@ -262,41 +262,33 @@ KDTreeLinkerAlgo<DATA,DIM>::recNearestNeighbour(unsigned int depth,
 						const KDTreeNodeT<DATA,DIM> *current,
 						const KDTreeNodeInfoT<DATA,DIM> &point,
 						const KDTreeNodeT<DATA,DIM> *best_match,
-						float& best_dist) {
+						float& best_dist) 
+{
+  if(current == nullptr) return;
+  
   const unsigned int current_dim = depth % DIM;
-  if( current->left == nullptr && current->right == nullptr ) {    
+  const float dist_current = dist2(point,current->info);
+  const float dist_to_axis =  point.dims[current_dim] - current->info.dims[current_dim] ;
+
+  // compare to this node and see if it's a better match
+  // if it is, we update the result  
+  if( dist_current < best_dist ) {
+    best_dist = dist_current;
     best_match = current;
-    best_dist = dist2(point,best_match->info);
-    return;
-  } else {
-    const float dist_to_axis =  point.dims[current_dim] - current->info.dims[current_dim] ;
+  }
+  
+  if( dist_to_axis < 0.f ) 
+    recNearestNeighbour(depth+1,current->left,point,best_match,best_dist);
+  else 
+    recNearestNeighbour(depth+1,current->right,point,best_match,best_dist);
+
+  //now we see if the radius to best crosses the splitting axis     
+  if( best_dist > dist_to_axis*dist_to_axis ) {
+    // if it does we traverse the other side of the axis to check for a new best
     if( dist_to_axis < 0.f ) 
-      recNearestNeighbour(depth+1,current->left,point,best_match,best_dist);
-    else 
       recNearestNeighbour(depth+1,current->right,point,best_match,best_dist);
-    // if we're here we're returned so best_dist is filled
-    // compare to this node and see if it's a better match
-    // if it is, we update the result
-    const float dist_current = dist2(point,current->info);
-    if( dist_current < best_dist ) {
-      best_dist = dist_current;
-      best_match = current;
-    }
-    //now we see if the radius to best crosses the splitting axis     
-    if( best_dist > dist_to_axis*dist_to_axis ) {
-      // if it does we traverse the other side of the axis to check for a new best
-      const KDTreeNodeT<DATA,DIM>* check_best = best_match;
-      float check_dist = best_dist;
-      if( dist_to_axis < 0.f ) 
-	recNearestNeighbour(depth+1,current->right,point,check_best,check_dist);
-      else
-	recNearestNeighbour(depth+1,current->left,point,check_best,check_dist);
-      if( check_dist < best_dist ) {
-	best_dist = check_dist;
-	best_match = check_best;
-      }      
-    }    
-    return;
+    else
+      recNearestNeighbour(depth+1,current->left,point,best_match,best_dist);
   }
 }
 
