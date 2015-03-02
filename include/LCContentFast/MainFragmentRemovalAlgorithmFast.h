@@ -14,6 +14,7 @@
 
 #include "LCContentFast/KDTreeLinkerAlgoT.h"
 #include <unordered_map>
+#include <unordered_set>
 
 namespace lc_content_fast
 {  
@@ -27,6 +28,7 @@ typedef std::unordered_map<const pandora::Cluster*,const pandora::Cluster*> Clus
 typedef std::unordered_map<const pandora::CaloHit*,const pandora::Cluster*> HitsToClustersMap; // note that this map is used indirected
 typedef std::unordered_map<const pandora::Cluster*,pandora::ClusterList> ClusterToNeighbourClustersMap;
 typedef std::unordered_map<const pandora::Cluster*,std::unique_ptr<HitKDTree> > ClusterToKDTreeMap;
+typedef std::unordered_set<const pandora::Cluster*> DeletedClusters;
 typedef std::unordered_map<const pandora::Cluster*, bool> IdCache;
 
 /**
@@ -247,6 +249,9 @@ private:
     typedef ChargedClusterContact::Parameters ContactParameters;
     ContactParameters   m_contactParameters;                        ///< The charged cluster contact parameters
 
+	//keep track of deleted clusters
+	DeletedClusters notouching;	
+	
     unsigned int        m_minDaughterCaloHits;                      ///< Min number of calo hits in daughter candidate clusters
     float               m_minDaughterHadronicEnergy;                ///< Min hadronic energy for daughter candidate clusters
 

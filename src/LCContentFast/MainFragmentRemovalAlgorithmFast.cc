@@ -130,6 +130,9 @@ StatusCode MainFragmentRemovalAlgorithm::Run()
 {
     bool isFirstPass(true), shouldRecalculate(true);
 
+	//clear deleted clusters map when we start running
+	notouching.clear();
+	
     // particle ID lives up here now
     const ParticleId *pParticleId(PandoraContentApi::GetPlugins(*this)->GetParticleId());
 
@@ -202,6 +205,9 @@ StatusCode MainFragmentRemovalAlgorithm::Run()
 
         if ((NULL != pBestParentCluster) && (NULL != pBestDaughterCluster))
         {
+			assert(notouching.find(pBestParentCluster)==notouching.end());
+			assert(notouching.find(pBestDaughterCluster)==notouching.end());
+			
             PANDORA_RETURN_RESULT_IF(STATUS_CODE_SUCCESS, !=, this->GetAffectedClusters(chargedClusterContactMap, pBestParentCluster,
                 pBestDaughterCluster, affectedClusters));
 
@@ -212,7 +218,9 @@ StatusCode MainFragmentRemovalAlgorithm::Run()
 	    shouldRecalculate = true;
 
             PANDORA_RETURN_RESULT_IF(STATUS_CODE_SUCCESS, !=, PandoraContentApi::MergeAndDeleteClusters(*this, pBestParentCluster,
-                pBestDaughterCluster));	    	    
+                pBestDaughterCluster));
+
+            notouching.insert(pBestDaughterCluster);
         }
     }
 
@@ -235,6 +243,8 @@ StatusCode MainFragmentRemovalAlgorithm::GetChargedClusterContactMap(bool &isFir
     for (ClusterList::const_iterator iter = pClusterList->begin(), iterEnd = pClusterList->end(); iter != iterEnd; ++iter)
     {
         const Cluster *pCluster = *iter;
+		
+		assert(notouching.find(pCluster)==notouching.end());
 
         if ( id_cache.find(pCluster)->second ) // remember this is the or of the ele and muon IDs
         {
@@ -268,6 +278,8 @@ StatusCode MainFragmentRemovalAlgorithm::GetChargedClusterContactMap(bool &isFir
     {
         // everything for this cluster to be a daughter cluster is now qualified in the first loop
         const Cluster *pDaughterCluster = *iterI;        
+		
+		assert(notouching.find(pDaughterCluster)==notouching.end());
 
 	// find all nearby clusters in the neighbours cache	
 	ClusterList nearby_clusters;
@@ -282,6 +294,8 @@ StatusCode MainFragmentRemovalAlgorithm::GetChargedClusterContactMap(bool &isFir
         for (auto iterJ = nearby_clusters.begin(), iterJEnd = nearby_clusters.end(); iterJ != iterJEnd; ++iterJ)
         {
 	    const Cluster *pParentCluster = *iterJ;	    
+		
+		assert(notouching.find(pParentCluster)==notouching.end());
 	    
 	    // protections here since we searched over the list of all neighbours
             if ( pDaughterCluster == pParentCluster )
@@ -335,6 +349,7 @@ StatusCode MainFragmentRemovalAlgorithm::GetClusterMergingCandidates(const Charg
     for (ChargedClusterContactMap::const_iterator iterI = chargedClusterContactMap.begin(), iterIEnd = chargedClusterContactMap.end(); iterI != iterIEnd; ++iterI)
     {
         const Cluster *pDaughterCluster = iterI->first;
+		assert(notouching.find(pDaughterCluster)==notouching.end());
         float globalDeltaChi2(0.f);
 
         // Check to see if merging parent and daughter clusters would improve track-cluster compatibility
